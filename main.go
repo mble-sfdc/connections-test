@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"flag"
 	"fmt"
 	"math"
 	"math/rand"
@@ -16,14 +17,18 @@ import (
 	_ "github.com/lib/pq"
 )
 
-var connStr = "postgres://localhost/connections-test?sslmode=disable"
-var numLoops = 1000
-var numTables = 50
-
 func main() {
-	db, err := sql.Open("postgres", connStr)
+	loopsFlag := flag.Int("loops", 450, "number of concurrent conns")
+	flag.Parse()
+
+	var numLoops = *loopsFlag
+	var numTables = 50
+
+	dbURL := os.Getenv("DATABASE_URL")
+
+	db, err := sql.Open("postgres", dbURL)
 	if err != nil {
-		panic(fmt.Errorf("Error opening database: %v", err))
+		panic(fmt.Errorf("error opening database: %v", err))
 	}
 	db.SetConnMaxLifetime(time.Duration(-1))
 	db.SetMaxOpenConns(numLoops)
@@ -37,7 +42,7 @@ func main() {
 	for i := 0; i < numLoops; i++ {
 		conns[i], err = establishConnection(db)
 		if err != nil {
-			panic(fmt.Errorf("Error establishing connections: %v", err))
+			panic(fmt.Errorf("error establishing connections: %v", err))
 		}
 	}
 
@@ -49,7 +54,7 @@ func main() {
 		for i := 0; i < numLoops; i++ {
 			err := conns[i].Close()
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error closing connection: %v\n", err)
+				fmt.Fprintf(os.Stderr, "error closing connection: %v\n", err)
 			}
 		}
 	}()
@@ -66,7 +71,7 @@ func main() {
 		)`,
 			i))
 		if err != nil {
-			panic(fmt.Errorf("Error creating table: %v", err))
+			panic(fmt.Errorf("error creating table: %v", err))
 		}
 	}
 
@@ -80,7 +85,7 @@ func main() {
 			DROP TABLE "users_%v"
 		`, i))
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error dropping table: %v\n", err)
+				fmt.Fprintf(os.Stderr, "error dropping table: %v\n", err)
 			}
 
 		}
@@ -92,7 +97,7 @@ func main() {
 
 	// Do a couple initial runs to warm things up
 	for i := 0; i < numLoops; i++ {
-		_, err := run(conns[i], i)
+		_, err := run(conns[i], i, numTables)
 		if err != nil {
 			panic(err)
 		}
@@ -128,7 +133,7 @@ func main() {
 			go func() {
 				defer wg.Done()
 
-				elapsed, err := run(conn, i)
+				elapsed, err := run(conn, i, numTables)
 				if err != nil {
 					atomic.AddInt32(&numErrors, 1)
 					fmt.Fprintf(os.Stderr, "Error during work loop: %v\n", err)
@@ -159,7 +164,7 @@ func main() {
 
 	err = db.Close()
 	if err != nil {
-		panic(fmt.Errorf("Error closing database: %v", err))
+		panic(fmt.Errorf("error closing database: %v", err))
 	}
 }
 
@@ -177,7 +182,7 @@ func establishConnection(db *sql.DB) (*sql.Conn, error) {
 		}
 
 		if i == connRetries-1 {
-			return nil, fmt.Errorf("Error opening connection: %v", err)
+			return nil, fmt.Errorf("error opening connection: %v", err)
 		}
 
 		var sleepTime float64
@@ -192,14 +197,14 @@ func establishConnection(db *sql.DB) (*sql.Conn, error) {
 	panic("Unreachable")
 }
 
-func run(conn *sql.Conn, workerNum int) (time.Duration, error) {
+func run(conn *sql.Conn, workerNum, numTables int) (time.Duration, error) {
 	tableNum := workerNum % numTables
 
 	start := time.Now()
 
 	tx, err := conn.BeginTx(context.TODO(), nil)
 	if err != nil {
-		return time.Duration(0), fmt.Errorf("Error beginning transaction: %v", err)
+		return time.Duration(0), fmt.Errorf("error beginning transaction: %v", err)
 	}
 
 	ids := make([]int64, 10)
@@ -215,7 +220,7 @@ func run(conn *sql.Conn, workerNum int) (time.Duration, error) {
 			) RETURNING id`,
 			tableNum), name).Scan(&ids[i])
 		if err != nil {
-			return time.Duration(0), fmt.Errorf("Error inserting row: %v", err)
+			return time.Duration(0), fmt.Errorf("error inserting row: %v", err)
 		}
 	}
 
@@ -227,7 +232,7 @@ func run(conn *sql.Conn, workerNum int) (time.Duration, error) {
 			WHERE id = $1
 		`, tableNum), ids[i]).Scan(&id, &name)
 		if err != nil {
-			return time.Duration(0), fmt.Errorf("Error selecting row: %v", err)
+			return time.Duration(0), fmt.Errorf("error selecting row: %v", err)
 		}
 	}
 
@@ -237,15 +242,15 @@ func run(conn *sql.Conn, workerNum int) (time.Duration, error) {
 			WHERE id = $1
 		`, tableNum), ids[i])
 		if err != nil {
-			return time.Duration(0), fmt.Errorf("Error deleting row: %v", err)
+			return time.Duration(0), fmt.Errorf("error deleting row: %v", err)
 		}
 	}
 
 	err = tx.Commit()
 	if err != nil {
-		return time.Duration(0), fmt.Errorf("Error committing transaction: %v", err)
+		return time.Duration(0), fmt.Errorf("error committing transaction: %v", err)
 	}
 
-	elapsed := time.Now().Sub(start)
+	elapsed := time.Since(start)
 	return elapsed, nil
 }
